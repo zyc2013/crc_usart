@@ -6,6 +6,7 @@
 std::vector<double> angle;
 geometry_msgs::Twist pose;
 geometry_msgs::Twist cmd_pose;
+#define RAD2DEG(x) ((x)*180./M_PI)
 double laser;
 int adjust_sign=0;
 double degree=0;
@@ -21,9 +22,12 @@ double slide[4]={0,0,0,0};
 double cos_angle[4]={0,0,0,0};
 double cal_angle[4]={0,0,0,0};
 double diff_y=0;
+double diff_angle=0;
 double diff_x=0;
 double offset_front_x=0.1;
-double offset_back_x=0.22;
+double x_vel;
+double y_vel;
+double offset_back_x=0.05;//激光模块到补弹口中心，正向为正
 double limit(double x,int a,int b)
 {
 if (x>a)
@@ -33,20 +37,29 @@ return b;
 else
 return x;
 }
+double myabs(double x)
+{
+if (x<0)
+return -x;
+else
+return x;
+}
 void sendCallback(const sensor_msgs::LaserScan& msg)//right
 {
+  //ROS_INFO("11");
 int count = msg.scan_time / msg.time_increment;
 for(int i = 0; i < count; i++)
  {
+   float degree = RAD2DEG(msg.angle_min + msg.angle_increment * i);
       if(degree>-90.1&&degree<-89.9)
 {
        // ROS_INFO("right=: [%f, %f]", degree, msg.ranges[i]);
 angle[0]=msg.ranges[i];
-//pose.linear.y=msg.ranges[i];
+pose.linear.y=msg.ranges[i];
 }
 if(degree>-85.1&&degree<-84.9)
 {
-       // ROS_INFO("right=: [%f, %f]", degree, msg.ranges[i]);
+        //ROS_INFO("right=: [%f, %f]", degree, msg.ranges[i]);
 angle[1]=msg.ranges[i];
 }
 if(degree>-80.1&&degree<-79.9)
@@ -82,8 +95,8 @@ slide[3]=sqrt(angle[0]*angle[0]+angle[3]*angle[3]-2*angle[0]*angle[3]*cos(0.349)
   cal_angle[3]=(cos_angle[3]>0.99?0.99:(cos_angle[3]<-0.99)?-0,99:acos(cos_angle[3]));
 ans[4]=cal_angle[3]+1.57;//cal_angle-90+180
 ans[0]=(ans[1]+ans[2]+ans[3]+ans[4])/4;
-diff_y=(angle[0]+offset_front_x*tan(3.1416-ans[0]))*cos(3.1416-ans[0])-60;//距底面
-diff_x=(laser+offset_back_x)*cos(3.1416-ans[0])-50;//距侧面
+diff_y=(angle[0]+offset_front_x*tan(3.1416-ans[0]))*cos(3.1416-ans[0])-0.6;//距底面
+diff_x=(laser+offset_back_x)*cos(3.1416-ans[0])-0.5;//距侧面,单位m
 }
 void posCallback(const geometry_msgs::Twist &pos)
 {
@@ -93,49 +106,69 @@ pose.angular.z=pos.angular.z;//角速度信息
 }
 void adjust_Callback(const std_msgs::Int16 &sign)
 {
-adjust_sign=sign.data;
+adjust_sign=1;
+}
+void vel_Callback(const geometry_msgs::Twist &vel)
+{
+  x_vel=vel.linear.x;
+  y_vel=vel.linear.y;
 }
 int main(int argc,char** argv)
 {
-ros::init(argc,argv,"serial");
+ros::init(argc,argv,"add_bufflet");
 	ros::NodeHandle n;
 angle.push_back(0);
 angle.push_back(0);
 angle.push_back(0);
-  ros::Subscriber sub_scan = n.subscribe("scan",1000,sendCallback);//位置？
-  ros::Publisher pub_vel=n.advertise<geometry_msgs::Twist>("cmd_vel",1);
+ros::Subscriber sub_scan = n.subscribe("scan",1000,sendCallback);//位置？
+ros::Publisher pub_vel=n.advertise<geometry_msgs::Twist>("cmd_vel",1);
 ros::Subscriber laser_scan = n.subscribe("uwb_msg",1000,posCallback);
-ros::Subscriber adjust = n.subscribe("adjust",1000,adjust_Callback);
-ros::Rate rate(100);
+ros::Subscriber adjust_sub = n.subscribe("adjust",1000,adjust_Callback);
+ros::Subscriber vel_sub = n.subscribe("raw_vel",1000,vel_Callback);
+ros::Rate rate(10);
 while(ros::ok())
 {
+ROS_INFO_STREAM("x="<<laser<<"y"<<pose.linear.y<<"angle"<<ans[0]);
+
+//ROS_INFO_STREAM("1="<<ans[0]<<"2="<<ans[1]<<"3="<<ans[2]<<"4="<<ans[3]<<"5="<<ans[4]);
 if (adjust_sign)
 {
 //调整pid
-double diff_angle=ans[0]-3.1416;
+diff_angle=ans[0]-3.1416;
 diff_i_angle+=diff_angle*0.01;
 diff_i_angle=limit(diff_i_angle,1,-1);
-out_v_angle=diff_angle*3+diff_i_angle*10;
-cmd_pose.angular.z=limit(out_v_angle,3.0,-3.0);
+//out_v_angle=diff_angle*3+diff_i_angle*10;
+out_v_angle=diff_angle*3;
+cmd_pose.angular.z=-limit(out_v_angle,1.0,-1.0);//方向相反
 //double diff_y=angle[0]*cos(ans[0])-60;
 diff_i_y+=diff_y*0.01;
 diff_i_y=limit(diff_i_y,1,-1);
-out_v_y=diff_y*3+diff_i_y*10;
-cmd_pose.linear.y=limit(out_v_y,3.0,-3.0);
+//out_v_y=diff_y*3+diff_i_y*10;
+out_v_y=diff_y*3+0.4*y_vel;
+cmd_pose.linear.y=-limit(out_v_y,1.0,-1.0);
 //double diff_x=laser-50;
 diff_i_x+=diff_x*0.01;
-diff_i_x=limit(diff_i_x,1,-1);
-out_v_x=diff_x*3+diff_i_x*10;
-cmd_pose.linear.x=limit(out_v_x,3.0,-3.0);
-if(abs(diff_x)<5&&abs(diff_y)<5&&abs(cmd_pose.linear.x)<0.5&&abs(cmd_pose.linear.y)<0.5&&adjust_sign==1)//保证发布补弹信息只有1次
+//diff_i_x=limit(diff_i_x,1,-1);
+//out_v_x=diff_x*3+diff_i_x*10;
+out_v_x=diff_x*3+0.4*x_vel;
+cmd_pose.linear.x=-limit(out_v_x,1.0,-1.0);
+//if(abs(diff_x)<5&&abs(diff_y)<5&&abs(cmd_pose.linear.x)<0.5&&abs(cmd_pose.linear.y)<0.5&&adjust_sign==1&&abs(diff_angle)<0.2)//保证发布补弹信息只有1次
+ROS_INFO_STREAM("diff_angle="<<myabs(diff_angle)<<"out_v_angle"<<out_v_angle<<"cmd_pose.angular.z="<<myabs(cmd_pose.angular.z)<<"adjust_sign"<<adjust_sign);
+ROS_INFO_STREAM("diff_x="<<diff_x<<"diff_y"<<diff_y);
+if(adjust_sign>0&&myabs(diff_angle)<0.1&&myabs(cmd_pose.angular.z)>0&&myabs(cmd_pose.angular.z)<0.5&&myabs(diff_x)<0.05&&myabs(diff_y)<0.05)
 {
-cmd_pose.angular.x=1;
-adjust_sign=2;//为2后不再发布补弹真
+ROS_INFO_STREAM("OK!!!!!!!!!!!!!!");
+cmd_pose.angular.x=1;//第四位是补弹指令
+//adjust_sign=2;//为2后不再发布补弹真
+cmd_pose.angular.z=0;//发送旋转标志为0
+cmd_pose.linear.x=0;//发送旋转标志为0
+cmd_pose.linear.y=0;//发送旋转标志为0
+adjust_sign++;
 }
 
 pub_vel.publish(cmd_pose);
 cmd_pose.angular.x=0;//补弹假
-if(adjust_sign==2)
+if(adjust_sign==5)
 adjust_sign=0;//每次发布补弹后再发布一次，还原补弹标志位
 }
 ros::spinOnce();
@@ -143,4 +176,3 @@ rate.sleep();
 }
 return 0;
 }
-
